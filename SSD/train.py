@@ -12,14 +12,13 @@ import mxnet.autograd as autograd
 import mxnet.contrib.amp as amp
 import mxnet.gluon as gluon
 import numpy as np
-from mxboard import SummaryWriter
-from tqdm import tqdm
-
 from core import HuberLoss, SoftmaxCrossEntropyLoss
-from core import SSD_VGG16, TargetGenerator, Prediction
+from core import SSD_VGG16, Prediction
 from core import Voc_2007_AP
 from core import plot_bbox, export_block_for_cplusplus, PostNet
 from core import traindataloader, validdataloader
+from mxboard import SummaryWriter
+from tqdm import tqdm
 
 logfilepath = ""
 if os.path.isfile(logfilepath):
@@ -67,6 +66,7 @@ def run(mean=[0.485, 0.456, 0.406],
         multiperclass=True,
         nms_thresh=0.45,
         nms_topk=500,
+        iou_thresh=0.5,
         except_class_thresh=0.01,
         plot_class_thresh=0.5):
     if GPU_COUNT == 0:
@@ -134,8 +134,6 @@ def run(mean=[0.485, 0.456, 0.406],
                                                           factor_scale=factor_scale,
                                                           augmentation=data_augmentation,
                                                           path=train_dataset_path,
-                                                          image_normalization=True,
-                                                          box_normalization=False,
                                                           input_size=input_size,
                                                           batch_size=batch_size,
                                                           batch_interval=batch_interval,
@@ -143,14 +141,13 @@ def run(mean=[0.485, 0.456, 0.406],
                                                           shuffle=True, mean=mean, std=std, net=net,
                                                           foreground_iou_thresh=foreground_iou_thresh, make_target=True)
         valid_dataloader, valid_dataset = validdataloader(path=valid_dataset_path,
-                                                          image_normalization=True,
-                                                          box_normalization=False,
                                                           input_size=input_size,
                                                           batch_size=valid_size,
                                                           num_workers=num_workers,
-                                                          shuffle=True, mean=mean, std=std)
-    except Exception as E:
-        logging.info(E)
+                                                          shuffle=True, mean=mean, std=std, net=net,
+                                                          foreground_iou_thresh=foreground_iou_thresh, make_target=True)
+    except Exception:
+        logging.info("dataset 없음")
         exit(0)
 
     train_update_number_per_epoch = len(train_dataloader)
@@ -335,8 +332,6 @@ def run(mean=[0.485, 0.456, 0.406],
                                       reduction="sum",
                                       exclude=False)
 
-    targetgenerator = TargetGenerator(foreground_iou_thresh=foreground_iou_thresh)
-
     prediction = Prediction(
         from_softmax=False,
         num_classes=num_classes,
@@ -346,7 +341,7 @@ def run(mean=[0.485, 0.456, 0.406],
         except_class_thresh=except_class_thresh,
         multiperclass=multiperclass)
 
-    precision_recall = Voc_2007_AP(iou_thresh=0.5, class_names=name_classes)
+    precision_recall = Voc_2007_AP(iou_thresh=iou_thresh, class_names=name_classes)
 
     start_time = time.time()
 
@@ -356,33 +351,33 @@ def run(mean=[0.485, 0.456, 0.406],
         loc_loss_sum = 0
         time_stamp = time.time()
 
-        for batch_count, (image, cls_t, box_t, _) in enumerate(train_dataloader, start=1):
+        for batch_count, (image, _, cls_all, box_all, _) in enumerate(train_dataloader, start=1):
             td_batch_size = image.shape[0]
 
-            image_split = mx.nd.split(data=image, num_outputs=subdivision, axis=0)
-            cls_split = mx.nd.split(data=cls_t, num_outputs=subdivision, axis=0)
-            box_split = mx.nd.split(data=box_t, num_outputs=subdivision, axis=0)
+            image = mx.nd.split(data=image, num_outputs=subdivision, axis=0)
+            cls_all = mx.nd.split(data=cls_all, num_outputs=subdivision, axis=0)
+            box_all = mx.nd.split(data=box_all, num_outputs=subdivision, axis=0)
 
             if subdivision == 1:
-                image_split = [image_split]
-                cls_split = [cls_split]
-                box_split = [box_split]
+                image = [image]
+                cls_t_all = [cls_t_all]
+                box_t_all = [box_t_all]
 
             with autograd.record(train_mode=True):
 
                 cls_all_losses = []
                 box_all_losses = []
 
-                for image_part, cls_part, box_part in zip(image_split, cls_split, box_split):
+                for image_split, cls_split, box_split in zip(image, cls_all, box_all):
 
                     if GPU_COUNT <= 1:
-                        image_part = gluon.utils.split_and_load(image_part, [ctx], even_split=False)
-                        cls_part = gluon.utils.split_and_load(cls_part, [ctx], even_split=False)
-                        box_part = gluon.utils.split_and_load(box_part, [ctx], even_split=False)
+                        image_split = gluon.utils.split_and_load(image_split, [ctx], even_split=False)
+                        cls_split = gluon.utils.split_and_load(cls_split, [ctx], even_split=False)
+                        box_split = gluon.utils.split_and_load(box_split, [ctx], even_split=False)
                     else:
-                        image_part = gluon.utils.split_and_load(image_part, ctx, even_split=False)
-                        cls_part = gluon.utils.split_and_load(cls_part, ctx, even_split=False)
-                        box_part = gluon.utils.split_and_load(box_part, ctx, even_split=False)
+                        image_split = gluon.utils.split_and_load(image_split, ctx, even_split=False)
+                        cls_split = gluon.utils.split_and_load(cls_split, ctx, even_split=False)
+                        box_split = gluon.utils.split_and_load(box_split, ctx, even_split=False)
 
                     # prediction, target space for Data Parallelism
                     cls_losses = []
@@ -390,7 +385,7 @@ def run(mean=[0.485, 0.456, 0.406],
                     total_loss = []
 
                     # gpu N 개를 대비한 코드 (Data Parallelism)
-                    for img, cls_target, box_target in zip(image_part, cls_part, box_part):
+                    for img, cls_target, box_target in zip(image_split, cls_split, box_split):
                         # 1. SSD network Inference
                         cls_pred, box_pred, anchor = net(img)
                         '''
@@ -492,15 +487,16 @@ def run(mean=[0.485, 0.456, 0.406],
                 logging.info(f'[Epoch {i}][Batch {batch_count}/{train_update_number_per_epoch}],'
                              f'[Speed {td_batch_size / (time.time() - time_stamp):.3f} samples/sec],'
                              f'[Lr = {trainer.learning_rate}]'
-                             f'[confidence loss = {np.divide(conf_loss_sum, batch_count):.3f}]'
-                             f'[localization loss = {np.divide(loc_loss_sum, batch_count):.3f}]')
+                             f'[confidence loss = {sum(cls_all_losses) / td_batch_size:.3f}]'
+                             f'[localization loss = {sum(box_all_losses) / td_batch_size:.3f}]')
             time_stamp = time.time()
 
         train_conf_loss_mean = np.divide(conf_loss_sum, train_update_number_per_epoch)
         train_loc_loss_mean = np.divide(loc_loss_sum, train_update_number_per_epoch)
+        train_total_loss_mean = train_conf_loss_mean + train_loc_loss_mean
 
         logging.info(
-            f"train confidence loss : {train_conf_loss_mean} / train localization loss : {train_loc_loss_mean}")
+            f"train confidence loss : {train_conf_loss_mean} / train localization loss : {train_loc_loss_mean} / train total loss : {train_total_loss_mean}")
 
         if i % eval_period == 0 and valid_list:
 
@@ -519,22 +515,26 @@ def run(mean=[0.485, 0.456, 0.406],
 
             conf_loss_sum = 0
             loc_loss_sum = 0
+            for image, label, cls_all, box_all, _ in valid_dataloader:
 
-            for image, label, _ in valid_dataloader:
                 vd_batch_size = image.shape[0]
                 if GPU_COUNT <= 1:
                     image = gluon.utils.split_and_load(image, [ctx], even_split=False)
                     label = gluon.utils.split_and_load(label, [ctx], even_split=False)
+                    cls_all = gluon.utils.split_and_load(cls_all, [ctx], even_split=False)
+                    box_all = gluon.utils.split_and_load(box_all, [ctx], even_split=False)
                 else:
                     image = gluon.utils.split_and_load(image, ctx, even_split=False)
                     label = gluon.utils.split_and_load(label, ctx, even_split=False)
+                    cls_all = gluon.utils.split_and_load(cls_all, [ctx], even_split=False)
+                    box_all = gluon.utils.split_and_load(box_all, [ctx], even_split=False)
 
                 # prediction, target space for Data Parallelism
                 cls_losses = []
                 box_losses = []
 
                 # gpu N 개를 대비한 코드 (Data Parallelism)
-                for img, lb in zip(image, label):
+                for img, lb, cls_target, box_target in zip(image, label, cls_all, box_all):
                     gt_box = lb[:, :, :4]
                     gt_id = lb[:, :, 4:5]
                     cls_pred, box_pred, anchor = net(img)
@@ -545,8 +545,6 @@ def run(mean=[0.485, 0.456, 0.406],
                                             pred_scores=score,
                                             gt_boxes=gt_box,
                                             gt_labels=gt_id)
-
-                    cls_target, box_target = targetgenerator(anchor, gt_box, gt_id)
 
                     positive_samples = cls_target > 0
                     positive_numbers = positive_samples.sum()
@@ -570,9 +568,10 @@ def run(mean=[0.485, 0.456, 0.406],
 
             valid_conf_loss_mean = np.divide(conf_loss_sum, valid_update_number_per_epoch)
             valid_loc_loss_mean = np.divide(loc_loss_sum, valid_update_number_per_epoch)
+            valid_total_loss_mean = valid_conf_loss_mean + valid_loc_loss_mean
 
             logging.info(
-                f"valid confidence loss : {valid_conf_loss_mean} / valid localization loss : {valid_loc_loss_mean}")
+                f"valid confidence loss : {valid_conf_loss_mean} / valid localization loss : {valid_loc_loss_mean} / valid total loss : {valid_total_loss_mean}")
 
             AP_appender = []
             round_position = 2
@@ -595,7 +594,7 @@ def run(mean=[0.485, 0.456, 0.406],
             if tensorboard:
                 # gpu N 개를 대비한 코드 (Data Parallelism)
                 dataloader_iter = iter(valid_dataloader)
-                image, label, _ = next(dataloader_iter)
+                image, label, _, _, _ = next(dataloader_iter)
                 if GPU_COUNT <= 1:
                     image = gluon.utils.split_and_load(image, [ctx], even_split=False)
                     label = gluon.utils.split_and_load(label, [ctx], even_split=False)
@@ -643,8 +642,8 @@ def run(mean=[0.485, 0.456, 0.406],
                                    value={"train_loc_loss": train_loc_loss_mean, "valid_loc_loss": valid_loc_loss_mean},
                                    global_step=i)
                 summary.add_scalar(tag="total_loss", value={
-                    "train_total_loss": train_conf_loss_mean + train_loc_loss_mean,
-                    "valid_total_loss": valid_conf_loss_mean + valid_loc_loss_mean}, global_step=i)
+                    "train_total_loss": train_total_loss_mean,
+                    "valid_total_loss": valid_total_loss_mean}, global_step=i)
 
                 params = net.collect_params().values()
                 if GPU_COUNT > 1:
@@ -657,8 +656,9 @@ def run(mean=[0.485, 0.456, 0.406],
 
         if i % save_period == 0:
 
-            if not os.path.exists(weight_path):
-                os.makedirs(weight_path)
+            weight_epoch_path = os.path.join(weight_path, str(i))
+            if not os.path.exists(weight_epoch_path):
+                os.makedirs(weight_epoch_path)
 
             '''
             Hybrid models can be serialized as JSON files using the export function
@@ -676,17 +676,8 @@ def run(mean=[0.485, 0.456, 0.406],
             try:
                 net.export(os.path.join(weight_path, f"{model}"), epoch=i, remove_amp_cast=True)
                 net.save_parameters(os.path.join(weight_path, f"{i}.params"))  # onnx 추출용
-                export_block_for_cplusplus(path=os.path.join(weight_path, f"{model}_pre"),
-                                           block=net,
-                                           data_shape=tuple(input_size) + tuple((3,)),
-                                           epoch=i,
-                                           preprocess=True,  # c++ 에서 inference시 opencv에서 읽은 이미지 그대로 넣으면 됨
-                                           layout='HWC',
-                                           ctx=context,
-                                           remove_amp_cast=True)
-
                 # network inference, decoder, nms까지 처리됨 - mxnet c++에서 편리함 / onnx로는 추출 못함.
-                export_block_for_cplusplus(path=os.path.join(weight_path, f"{model}_prepost"),
+                export_block_for_cplusplus(path=os.path.join(weight_epoch_path, f"{model}_prepost"),
                                            block=postnet,
                                            data_shape=tuple(input_size) + tuple((3,)),
                                            epoch=i,
@@ -750,5 +741,6 @@ if __name__ == "__main__":
         multiperclass=True,
         nms_thresh=0.45,
         nms_topk=500,
+        iou_thresh=0.5,
         except_class_thresh=0.01,
         plot_class_thresh=0.5)

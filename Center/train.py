@@ -13,15 +13,14 @@ import mxnet.autograd as autograd
 import mxnet.contrib.amp as amp
 import mxnet.gluon as gluon
 import numpy as np
-from mxboard import SummaryWriter
-from tqdm import tqdm
-
 from core import CenterNet
 from core import HeatmapFocalLoss, NormedL1Loss
 from core import Prediction
 from core import Voc_2007_AP
 from core import plot_bbox, export_block_for_cplusplus, PostNet
 from core import traindataloader, validdataloader
+from mxboard import SummaryWriter
+from tqdm import tqdm
 
 logfilepath = ""
 if os.path.isfile(logfilepath):
@@ -61,6 +60,7 @@ def run(mean=[0.485, 0.456, 0.406],
         valid_graph_path="valid_Graph",
         using_mlflow=True,
         topk=100,
+        iou_thresh=0.5,
         plot_class_thresh=0.5):
     '''
     AMP 가 모든 연산을 지원하지는 않는다.
@@ -131,10 +131,11 @@ def run(mean=[0.485, 0.456, 0.406],
                                                           input_size=input_size,
                                                           batch_size=valid_size,
                                                           num_workers=num_workers,
-                                                          shuffle=True, mean=mean, std=std, scale_factor=scale_factor)
+                                                          shuffle=True, mean=mean, std=std, scale_factor=scale_factor,
+                                                          make_target=True)
 
-    except Exception as E:
-        logging.info(E)
+    except Exception:
+        logging.info("dataset 없음")
         exit(0)
 
     train_update_number_per_epoch = len(train_dataloader)
@@ -280,8 +281,8 @@ def run(mean=[0.485, 0.456, 0.406],
 
     heatmapfocalloss = HeatmapFocalLoss(from_sigmoid=True, alpha=2, beta=4)
     normedl1loss = NormedL1Loss()
-    prediction = Prediction(batch_size=valid_size, topk=topk, scale=scale_factor, amp=AMP)
-    precision_recall = Voc_2007_AP(iou_thresh=0.5, class_names=name_classes)
+    prediction = Prediction(batch_size=valid_size, topk=topk, scale=scale_factor)
+    precision_recall = Voc_2007_AP(iou_thresh=iou_thresh, class_names=name_classes)
 
     start_time = time.time()
     for i in tqdm(range(start_epoch + 1, epoch + 1, 1), initial=start_epoch + 1, total=epoch):
@@ -295,8 +296,9 @@ def run(mean=[0.485, 0.456, 0.406],
         target generator를 train_dataloader에서 만들어 버리는게 학습 속도가 훨씬 빠르다. 
         '''
 
-        for batch_count, (image, heatmap, offset_target, wh_target, mask_target, _) in enumerate(train_dataloader,
-                                                                                                 start=1):
+        for batch_count, (image, _, heatmap, offset_target, wh_target, mask_target, _) in enumerate(
+                train_dataloader,
+                start=1):
             td_batch_size = image.shape[0]
 
             image_split = mx.nd.split(data=image, num_outputs=subdivision, axis=0)
@@ -387,17 +389,18 @@ def run(mean=[0.485, 0.456, 0.406],
                 logging.info(f'[Epoch {i}][Batch {batch_count}/{train_update_number_per_epoch}],'
                              f'[Speed {td_batch_size / (time.time() - time_stamp):.3f} samples/sec],'
                              f'[Lr = {trainer.learning_rate}]'
-                             f'[heatmap loss = {np.divide(heatmap_loss_sum, batch_count):.3f}]'
-                             f'[offset loss = {np.divide(offset_loss_sum, batch_count):.3f}]'
-                             f'[wh loss = {np.divide(wh_loss_sum, batch_count):.3f}]')
+                             f'[heatmap loss = {sum(heatmap_all_losses) / td_batch_size:.3f}]'
+                             f'[offset loss = {sum(offset_all_losses) / td_batch_size:.3f}]'
+                             f'[wh loss = {sum(wh_all_losses) / td_batch_size:.3f}]')
             time_stamp = time.time()
 
         train_heatmap_loss_mean = np.divide(heatmap_loss_sum, train_update_number_per_epoch)
         train_offset_loss_mean = np.divide(offset_loss_sum, train_update_number_per_epoch)
         train_wh_loss_mean = np.divide(wh_loss_sum, train_update_number_per_epoch)
+        train_total_loss_mean = train_heatmap_loss_mean + train_offset_loss_mean + train_wh_loss_mean
 
         logging.info(
-            f"train heatmap loss : {train_heatmap_loss_mean} / train offset loss : {train_offset_loss_mean} / train wh loss : {train_wh_loss_mean}")
+            f"train heatmap loss : {train_heatmap_loss_mean} / train offset loss : {train_offset_loss_mean} / train wh loss : {train_wh_loss_mean} / train total loss : {train_total_loss_mean}")
 
         if i % eval_period == 0 and valid_list:
 
@@ -460,9 +463,10 @@ def run(mean=[0.485, 0.456, 0.406],
             valid_heatmap_loss_mean = np.divide(heatmap_loss_sum, valid_update_number_per_epoch)
             valid_offset_loss_mean = np.divide(offset_loss_sum, valid_update_number_per_epoch)
             valid_wh_loss_mean = np.divide(wh_loss_sum, valid_update_number_per_epoch)
+            valid_total_loss_mean = valid_heatmap_loss_mean + valid_offset_loss_mean + valid_wh_loss_mean
 
             logging.info(
-                f"valid heatmap loss : {valid_heatmap_loss_mean} / valid offset loss : {valid_offset_loss_mean} / valid wh loss : {valid_wh_loss_mean}")
+                f"valid heatmap loss : {valid_heatmap_loss_mean} / valid offset loss : {valid_offset_loss_mean} / valid wh loss : {valid_wh_loss_mean} / valid total loss : {valid_total_loss_mean}")
 
             AP_appender = []
             round_position = 2
@@ -520,6 +524,7 @@ def run(mean=[0.485, 0.456, 0.406],
                         heatmap = cv2.resize(heatmap, dsize=(input_size[1], input_size[0]))  # 사이즈 원복
                         heatmap = heatmap.astype("uint8")  # float32 -> uint8
                         heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+                        heatmap[:, :, (0, 1, 2)] = heatmap[:, :, (2, 1, 0)]  # BGR -> RGB
                         heatmap = np.transpose(heatmap, axes=(2, 0, 1))  # (channel=3, height, width)
 
                         # ground truth box 그리기
@@ -555,8 +560,8 @@ def run(mean=[0.485, 0.456, 0.406],
                                    global_step=i)
 
                 summary.add_scalar(tag="total_loss", value={
-                    "train_total_loss": train_heatmap_loss_mean + train_offset_loss_mean + train_wh_loss_mean,
-                    "valid_total_loss": valid_heatmap_loss_mean + valid_offset_loss_mean + valid_wh_loss_mean},
+                    "train_total_loss": train_total_loss_mean,
+                    "valid_total_loss": valid_total_loss_mean},
                                    global_step=i)
 
                 params = net.collect_params().values()
@@ -570,9 +575,9 @@ def run(mean=[0.485, 0.456, 0.406],
 
         if i % save_period == 0:
 
-            if not os.path.exists(weight_path):
-                os.makedirs(weight_path)
-
+            weight_epoch_path = os.path.join(weight_path, str(i))
+            if not os.path.exists(weight_epoch_path):
+                os.makedirs(weight_epoch_path)
             '''
             Hybrid models can be serialized as JSON files using the export function
             Export HybridBlock to json format that can be loaded by SymbolBlock.imports, mxnet.mod.Module or the C++ interface.
@@ -583,21 +588,12 @@ def run(mean=[0.485, 0.456, 0.406],
             else:
                 context = mx.cpu(0)
 
-            auxnet = Prediction(batch_size=valid_size, topk=topk, scale=scale_factor)  # amp 없애기 위함
-            postnet = PostNet(net=net, auxnet=auxnet)
+            postnet = PostNet(net=net, auxnet=prediction)  # 새로운 객체가 생성
             try:
                 net.export(os.path.join(weight_path, f"{model}"), epoch=i, remove_amp_cast=True)
                 net.save_parameters(os.path.join(weight_path, f"{i}.params"))  # onnx 추출용
-                export_block_for_cplusplus(path=os.path.join(weight_path, f"{model}_pre"),
-                                           block=net,
-                                           data_shape=tuple(input_size) + tuple((3,)),
-                                           epoch=i,
-                                           preprocess=True,  # c++ 에서 inference시 opencv에서 읽은 이미지 그대로 넣으면 됨
-                                           layout='HWC',
-                                           ctx=context,
-                                           remove_amp_cast=True)
                 # network inference, decoder, nms까지 처리됨 - mxnet c++에서 편리함
-                export_block_for_cplusplus(path=os.path.join(weight_path, f"{model}_prepost"),
+                export_block_for_cplusplus(path=os.path.join(weight_epoch_path, f"{model}_prepost"),
                                            block=postnet,
                                            data_shape=tuple(input_size) + tuple((3,)),
                                            epoch=i,
@@ -654,4 +650,5 @@ if __name__ == "__main__":
         valid_graph_path="valid_Graph",
         using_mlflow=True,
         topk=100,
+        iou_thresh = 0.5,
         plot_class_thresh=0.5)

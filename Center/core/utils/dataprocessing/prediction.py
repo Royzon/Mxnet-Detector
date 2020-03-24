@@ -5,16 +5,14 @@ from mxnet.gluon.nn import MaxPool2D
 
 class Prediction(HybridBlock):
 
-    def __init__(self, batch_size=1, topk=100, scale=4.0, amp=False):
+    def __init__(self, batch_size=1, topk=100, scale=4.0):
         super(Prediction, self).__init__()
         self._batch_size = batch_size
         self._topk = topk
         self._scale = scale
-        self._amp = amp
         self._heatmap_nms = MaxPool2D(pool_size=(3, 3), strides=(1, 1), padding=(1, 1))
 
     def hybrid_forward(self, F, heatmap, offset, wh):
-
         '''
         The peak keypoint extraction serves
         as a sufficient NMS alternative and can be implemented efficiently on device using a 3 × 3 max pooling operation.
@@ -22,21 +20,16 @@ class Prediction(HybridBlock):
         keep = self._heatmap_nms(heatmap) == heatmap
         heatmap = F.broadcast_mul(keep, heatmap)
 
-        if self._amp:
-            floatdtype = "float16"
-            heatmap = F.cast(heatmap, dtype=floatdtype)  # topk는 float32에서 동작
-            offset = F.cast(heatmap, dtype=floatdtype)  # topk는 float32에서 동작
-            wh = F.cast(heatmap, dtype=floatdtype)  # topk는 float32에서 동작
-        else:
-            floatdtype = "float32"
-
         _, channel, height, width = heatmap.shape_array().split(num_outputs=4, axis=0)  # int64임
         # 상위 self._topk개만 뽑아내기
         scores, indices = heatmap.reshape((0, -1)).topk(k=self._topk, axis=-1, ret_typ='both',
                                                         is_ascend=False)  # (batch, channel * height * width)
+        scores = scores.expand_dims(-1)
+
         indices = F.cast(indices, dtype='int64')
         ids = F.broadcast_div(indices, (height * width))  # 정수/정수 는 정수 = // 연산
-        ids = F.cast(ids, 'float32') # c++에서 float으로 받아오기 때문에!!! 형 변환 필요
+        ids = F.cast(ids, "float32")  # c++에서 float으로 받아오기 때문에!!! 형 변환 필요
+        ids = ids.expand_dims(-1)
 
         '''
         박스 복구
@@ -68,8 +61,8 @@ class Prediction(HybridBlock):
             (-1, self._topk))  # (batch, height*width, 2) / (3, self_batch_size*self._topk)
         ys = F.gather_nd(offset, offset_ys).reshape(
             (-1, self._topk))  # (batch, height*width, 2) / (3, self_batch_size*self._topk)
-        topk_xs = F.cast(topk_xs, floatdtype) + xs
-        topk_ys = F.cast(topk_ys, floatdtype) + ys
+        topk_xs = F.cast(topk_xs, "float32") + xs
+        topk_ys = F.cast(topk_ys, "float32") + ys
         w = F.gather_nd(wh, offset_xs).reshape(
             (-1, self._topk))  # (batch, height*width, 2) / (3, self_batch_size*self._topk)
         h = F.gather_nd(wh, offset_ys).reshape(
@@ -109,7 +102,7 @@ if __name__ == "__main__":
                         ('wh', {'num_output': 2})
                     ]),
                     head_conv_channel=64,
-                    pretrained=True,
+                    pretrained=False,
                     root=os.path.join(root, 'models'),
                     use_dcnv2=False, ctx=mx.cpu())
 
@@ -118,13 +111,14 @@ if __name__ == "__main__":
     heatmap, offset, wh = net(
         mx.nd.random_uniform(low=0, high=1, shape=(2, 3, input_size[0], input_size[1]), ctx=mx.cpu()))
     ids, scores, bboxes = prediction(heatmap, offset, wh)
+
     print(f"< input size(height, width) : {input_size} >")
     print(f"topk class id shape : {ids.shape}")
     print(f"topk class scores shape : {scores.shape}")
     print(f"topk box predictions shape : {bboxes.shape}")
     '''
     < input size(height, width) : (512, 512) >
-    topk class id shape : (1, 100)
-    topk class scores shape : (1, 100)
-    topk box predictions shape : (1, 100, 4)
+    topk class id shape : (2, 100, 1)
+    topk class scores shape : (2, 100, 1)
+    topk box predictions shape : (2, 100, 4)
     '''

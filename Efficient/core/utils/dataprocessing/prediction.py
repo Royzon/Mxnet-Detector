@@ -70,16 +70,16 @@ class Prediction(HybridBlock):
 
 # test
 if __name__ == "__main__":
-    from core import Efficient, DetectionDataset
+    from core import Efficient, EfficientTrainTransform, DetectionDataset
     import os
 
     input_size = (512, 512)
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    dataset = DetectionDataset(path=os.path.join(root, 'Dataset', 'train'), input_size=input_size,
-                               image_normalization=True,
-                               box_normalization=False)
+    transform = EfficientTrainTransform(input_size[0], input_size[1], make_target=False)
+    dataset = DetectionDataset(path=os.path.join(root, 'Dataset', 'train'), transform=transform)
     num_classes = dataset.num_class
-    image, label, _ = dataset[0]
+    image, label, _, _, _ = dataset[0]
+    label = mx.nd.array(label)
 
     net = Efficient(version=0,
                     input_size=input_size,

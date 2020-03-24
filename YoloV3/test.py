@@ -5,13 +5,12 @@ import platform
 import mxnet as mx
 import mxnet.gluon as gluon
 import numpy as np
-from tqdm import tqdm
-
 from core import Voc_2007_AP
 from core import Yolov3Loss, TargetGenerator, Prediction
 from core import box_resize
 from core import plot_bbox
 from core import testdataloader
+from tqdm import tqdm
 
 logfilepath = ""  # 따로 지정하지 않으면 terminal에 뜸
 if os.path.isfile(logfilepath):
@@ -34,6 +33,7 @@ def run(mean=[0.485, 0.456, 0.406],
         multiperclass=True,
         nms_thresh=0.5,
         nms_topk=500,
+        iou_thresh=0.5,
         except_class_thresh=0.05,
         plot_class_thresh=0.5):
     if GPU_COUNT <= 0:
@@ -69,8 +69,6 @@ def run(mean=[0.485, 0.456, 0.406],
 
     try:
         test_dataloader, test_dataset = testdataloader(path=test_dataset_path,
-                                                       image_normalization=True,
-                                                       box_normalization=False,
                                                        input_size=(netheight, netwidth),
                                                        num_workers=num_workers,
                                                        mean=mean, std=std)
@@ -120,7 +118,7 @@ def run(mean=[0.485, 0.456, 0.406],
         except_class_thresh=except_class_thresh,
         multiperclass=multiperclass)
 
-    precision_recall = Voc_2007_AP(iou_thresh=0.5, class_names=name_classes)
+    precision_recall = Voc_2007_AP(iou_thresh=iou_thresh, class_names=name_classes)
 
     ground_truth_colors = {}
     for i in range(num_classes):
@@ -131,7 +129,7 @@ def run(mean=[0.485, 0.456, 0.406],
     wh_loss_sum = 0
     class_loss_sum = 0
 
-    for image, label, origin_image, origin_box, name in tqdm(test_dataloader):
+    for image, label, name, origin_image, origin_box in tqdm(test_dataloader):
         _, height, width, _ = origin_image.shape
         logging.info(f"real input size : {(height, width)}")
 
@@ -184,14 +182,14 @@ def run(mean=[0.485, 0.456, 0.406],
     train_wh_loss_mean = np.divide(wh_loss_sum, test_update_number_per_epoch)
     train_object_loss_mean = np.divide(object_loss_sum, test_update_number_per_epoch)
     train_class_loss_mean = np.divide(class_loss_sum, test_update_number_per_epoch)
-    train_total_loss = train_xcyc_loss_mean + train_wh_loss_mean + train_object_loss_mean + train_class_loss_mean
+    train_total_loss_mean = train_xcyc_loss_mean + train_wh_loss_mean + train_object_loss_mean + train_class_loss_mean
 
     logging.info(
         f"train xcyc loss : {train_xcyc_loss_mean} / "
         f"train wh loss : {train_wh_loss_mean} / "
         f"train object loss : {train_object_loss_mean} / "
         f"train class loss : {train_class_loss_mean} / "
-        f"train total loss : {train_total_loss}"
+        f"train total loss : {train_total_loss_mean}"
     )
 
     AP_appender = []
@@ -227,5 +225,6 @@ if __name__ == "__main__":
         multiperclass=True,
         nms_thresh=0.5,
         nms_topk=500,
+        iou_thresh=0.5,
         except_class_thresh=0.05,
         plot_class_thresh=0.5)  #

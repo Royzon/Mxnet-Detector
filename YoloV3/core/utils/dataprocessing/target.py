@@ -11,7 +11,7 @@ class TargetGenerator(Block):
     def __init__(self, ignore_threshold=0.5, dynamic=False, from_sigmoid=False):
         super(TargetGenerator, self).__init__()
         self._matcher = Matcher()
-        self._from_sigmoid=from_sigmoid
+        self._from_sigmoid = from_sigmoid
 
         '''
         https://github.com/eriklindernoren/PyTorch-YOLOv3/issues/61 : 이슈
@@ -38,16 +38,17 @@ class TargetGenerator(Block):
 
 # test
 if __name__ == "__main__":
-    from core import Yolov3, DetectionDataset
+    from core import Yolov3, YoloTrainTransform, DetectionDataset
     import os
 
     input_size = (416, 416)
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    dataset = DetectionDataset(path=os.path.join(root, 'Dataset', 'train'), input_size=input_size,
-                               image_normalization=True,
-                               box_normalization=False)
+    transform = YoloTrainTransform(input_size[0], input_size[1], make_target=False)
+    dataset = DetectionDataset(path=os.path.join(root, 'Dataset', 'train'), transform=transform)
     num_classes = dataset.num_class
-    image, label, _ = dataset[0]
+
+    image, label, _, _, _ = dataset[0]
+    label = mx.nd.array(label)
 
     net = Yolov3(Darknetlayer=53,
                  input_size=input_size,

@@ -5,19 +5,19 @@ import platform
 import mxnet as mx
 import mxnet.gluon as gluon
 import numpy as np
-from tqdm import tqdm
-
 from core import HuberLoss, SoftmaxCrossEntropyLoss
 from core import TargetGenerator, Prediction
 from core import Voc_2007_AP
 from core import box_resize
 from core import plot_bbox
 from core import testdataloader
+from tqdm import tqdm
 
 logfilepath = ""  # 따로 지정하지 않으면 terminal에 뜸
 if os.path.isfile(logfilepath):
     os.remove(logfilepath)
 logging.basicConfig(filename=logfilepath, level=logging.INFO)
+
 
 def run(mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225],
@@ -35,6 +35,7 @@ def run(mean=[0.485, 0.456, 0.406],
         multiperclass=True,
         nms_thresh=0.45,
         nms_topk=500,
+        iou_thresh=0.5,
         except_class_thresh=0.01,
         plot_class_thresh=0.5):
     if GPU_COUNT <= 0:
@@ -70,11 +71,9 @@ def run(mean=[0.485, 0.456, 0.406],
 
     try:
         test_dataloader, test_dataset = testdataloader(path=test_dataset_path,
-                                                       image_normalization=True,
-                                                       box_normalization=False,
                                                        input_size=(netheight, netwidth),
                                                        num_workers=num_workers,
-                                                       mean=mean , std = std)
+                                                       mean=mean, std=std)
     except Exception:
         logging.info("The dataset does not exist")
         exit(0)
@@ -128,7 +127,7 @@ def run(mean=[0.485, 0.456, 0.406],
         except_class_thresh=except_class_thresh,
         multiperclass=multiperclass)
 
-    precision_recall = Voc_2007_AP(iou_thresh=plot_class_thresh, class_names=name_classes)
+    precision_recall = Voc_2007_AP(iou_thresh=iou_thresh, class_names=name_classes)
 
     ground_truth_colors = {}
     for i in range(num_classes):
@@ -137,7 +136,7 @@ def run(mean=[0.485, 0.456, 0.406],
     conf_loss_sum = 0
     loc_loss_sum = 0
 
-    for image, label, origin_image, origin_box, name in tqdm(test_dataloader):
+    for image, label, name, origin_image, origin_box in tqdm(test_dataloader):
         _, height, width, _ = origin_image.shape
         logging.info(f"real input size : {(height, width)}")
         origin_image = origin_image.asnumpy()[0]
@@ -188,9 +187,10 @@ def run(mean=[0.485, 0.456, 0.406],
     # epoch 당 평균 loss
     test_conf_loss_mean = np.divide(conf_loss_sum, test_update_number_per_epoch)
     test_loc_loss_mean = np.divide(loc_loss_sum, test_update_number_per_epoch)
+    test_total_loss_mean = test_conf_loss_mean + test_loc_loss_mean
 
     logging.info(
-        f"test confidence loss : {test_conf_loss_mean} / test localization loss : {test_loc_loss_mean}")
+        f"test confidence loss : {test_conf_loss_mean} / test localization loss : {test_loc_loss_mean} / test total loss : {test_total_loss_mean}")
 
     AP_appender = []
     round_position = 2
@@ -226,5 +226,6 @@ if __name__ == "__main__":
         multiperclass=True,
         nms_thresh=0.45,
         nms_topk=500,
+        iou_thresh=0.5,
         except_class_thresh=0.01,
-        plot_class_thresh=0.5) # make_anchor는 사실 test.py에서는 필요 없는 기능이다.
+        plot_class_thresh=0.5)  # make_anchor는 사실 test.py에서는 필요 없는 기능이다.

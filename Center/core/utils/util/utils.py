@@ -150,8 +150,8 @@ def plot_bbox(img, bboxes, scores=None, labels=None, thresh=0.5,
 
         result = cv2.addWeighted(img, 0.5, copied_img, 0.5, 0)
 
-        if heatmap != None:
-            result = np.concatenate([np.array(result), np.array(heatmap)], axis=-1)
+        if heatmap is not None:
+            result = np.concatenate([result, heatmap], axis=1)
         if image_save:
             cv2.imwrite(os.path.join(image_save_path, image_name + ".jpg"), result)
         if image_show:
@@ -285,7 +285,8 @@ def export_block_for_cplusplus(path=None, block=None, data_shape=None, epoch=0, 
         wrapper_block.hybridize()
         try:
             wrapper_block(x)
-            wrapper_block.export(path, epoch, remove_amp_cast=remove_amp_cast)
+            if path != None:
+                wrapper_block.export(path, epoch, remove_amp_cast=remove_amp_cast)
             last_exception = None
             break
         except MXNetError as e:

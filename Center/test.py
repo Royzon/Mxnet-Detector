@@ -6,13 +6,12 @@ import cv2
 import mxnet as mx
 import mxnet.gluon as gluon
 import numpy as np
-from tqdm import tqdm
-
 from core import HeatmapFocalLoss, NormedL1Loss
 from core import TargetGenerator, Prediction
 from core import Voc_2007_AP
 from core import plot_bbox, box_resize
 from core import testdataloader
+from tqdm import tqdm
 
 logfilepath = ""  # 따로 지정하지 않으면 terminal에 뜸
 if os.path.isfile(logfilepath):
@@ -33,6 +32,7 @@ def run(mean=[0.485, 0.456, 0.406],
         show_flag=True,
         save_flag=True,
         topk=100,
+        iou_thresh=0.5,
         plot_class_thresh=0.5):
     if GPU_COUNT <= 0:
         ctx = mx.cpu(0)
@@ -109,7 +109,7 @@ def run(mean=[0.485, 0.456, 0.406],
     targetgenerator = TargetGenerator(num_classes=num_classes)
     prediction = Prediction(topk=topk, scale=scale_factor)
 
-    precision_recall = Voc_2007_AP(iou_thresh=0.5, class_names=name_classes)
+    precision_recall = Voc_2007_AP(iou_thresh=iou_thresh, class_names=name_classes)
 
     ground_truth_colors = {}
     for i in range(num_classes):
@@ -119,7 +119,7 @@ def run(mean=[0.485, 0.456, 0.406],
     offset_loss_sum = 0
     wh_loss_sum = 0
 
-    for image, label, origin_image, origin_box, name in tqdm(test_dataloader):
+    for image, label, name, origin_image, origin_box in tqdm(test_dataloader):
         _, height, width, _ = origin_image.shape
         logging.info(f"real input size : {(height, width)}")
         origin_image = origin_image.asnumpy()[0]
@@ -156,10 +156,13 @@ def run(mean=[0.485, 0.456, 0.406],
         plot_bbox(ground_truth, bbox, scores=scores[0], labels=ids[0], thresh=plot_class_thresh,
                   reverse_rgb=False,
                   class_names=test_dataset.classes, absolute_coordinates=True,
-                  image_show=show_flag, image_save=save_flag, image_save_path=test_save_path, image_name=name[0], heatmap=heatmap)
+                  image_show=show_flag, image_save=save_flag, image_save_path=test_save_path, image_name=name[0],
+                  heatmap=heatmap)
 
         heatmap_target, offset_target, wh_target, mask_target = targetgenerator(gt_boxes, gt_ids,
-                                                                                netwidth // scale_factor, netheight // scale_factor, image.context)
+                                                                                netwidth // scale_factor,
+                                                                                netheight // scale_factor,
+                                                                                image.context)
         heatmap_loss = heatmapfocalloss(heatmap_pred, heatmap_target)
         offset_loss = normedl1loss(offset_pred, offset_target, mask_target) * lambda_off
         wh_loss = normedl1loss(wh_pred, wh_target, mask_target) * lambda_size
@@ -172,9 +175,10 @@ def run(mean=[0.485, 0.456, 0.406],
     test_heatmap_loss_mean = np.divide(heatmap_loss_sum, test_update_number_per_epoch)
     test_offset_loss_mean = np.divide(offset_loss_sum, test_update_number_per_epoch)
     test_wh_loss_mean = np.divide(wh_loss_sum, test_update_number_per_epoch)
+    test_total_loss_mean = test_heatmap_loss_mean + test_offset_loss_mean + test_wh_loss_mean
 
     logging.info(
-        f"test heatmap loss : {test_heatmap_loss_mean} / test offset loss : {test_offset_loss_mean} / test wh loss : {test_wh_loss_mean}")
+        f"test heatmap loss : {test_heatmap_loss_mean} / test offset loss : {test_offset_loss_mean} / test wh loss : {test_wh_loss_mean} / test total loss : {test_total_loss_mean}")
 
     AP_appender = []
     round_position = 2
@@ -207,4 +211,5 @@ if __name__ == "__main__":
         show_flag=True,
         save_flag=True,
         topk=100,
+        iou_thresh=0.5,
         plot_class_thresh=0.5)
